@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+# 20p accepts a video URL (e.g. from Youtube), downloads the audio and generates
+# a 20 bullet point summary of the video.
+
+import openai
+import pydub
+import shutil
+import subprocess
+import sys
+import tempfile
+import tqdm
+
+chunk_prompt = """
+Summarize the following partial audio transcript into a maximum of 5 bullet points.
+
+%s
+""".strip()
+
+final_prompt = """
+Summarize the following bullet points into a maximum of 20 bullet points.
+
+%s
+""".strip()
+
+# Ensure external utilities exist
+
+if not shutil.which("ffmpeg"):
+    print("error: ffmpeg is missing", file=sys.stderr)
+    exit(1)
+ytdlp = shutil.which("yt-dlp")
+if not ytdlp:
+    print("error: yt-dlp is missing", file=sys.stderr)
+    exit(1)
+if len(sys.argv) != 2:
+    print("usage: %s <url>" % sys.argv[0], file=sys.stderr)
+    exit(1)
+url = sys.argv[1]
+
+# Ensure OpenAI is configured
+
+openai.ChatCompletion.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "system", "content": "say hi"}],
+    max_tokens=1,
+)
+
+# Download the audio
+
+audio = tempfile.NamedTemporaryFile(suffix=".mp3", delete=True)
+ytdlp_proc = subprocess.Popen(
+    [ytdlp, "-x", "--force-overwrites", "--audio-format=mp3", "-o", audio.name, url],
+)
+if ytdlp_proc.wait() != 0:
+    print("error: yt-dlp failed", file=sys.stderr)
+    exit(1)
+
+# Split the audio file into 10 minute chunks, transcribe and summarize each
+
+print("Summarizing each chunk", file=sys.stderr)
+chunk_file = tempfile.NamedTemporaryFile(suffix=f".chunk.mp3", delete=True)
+chunk_bps = []
+for i, chunk in tqdm.tqdm(
+    enumerate(pydub.AudioSegment.from_file(audio.name)[::600000])
+):
+    chunk_file.truncate()
+    chunk.export(chunk_file.name, format="mp3")
+    chunk_file.seek(0)
+    transcription = openai.Audio.transcribe("whisper-1", chunk_file)
+    chat_resp = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {
+                "role": "system",
+                "content": chunk_prompt % transcription.text,
+            },
+        ],
+    )
+    bps = chat_resp.choices[0].message.content.strip().splitlines()
+    chunk_bps.extend(bps)
+
+# Summarize all chunk bullet points into a final 20 points
+
+print("Summarizing all chunks", file=sys.stderr)
+chat_resp = openai.ChatCompletion.create(
+    model="gpt-3.5-turbo",
+    messages=[
+        {
+            "role": "system",
+            "content": final_prompt % "\n".join(chunk_bps),
+        },
+    ],
+)
+print("\n\n20 bullet points:")
+print(chat_resp.choices[0].message.content.strip())
