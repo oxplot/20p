@@ -1,3 +1,4 @@
 openai
 pydub
 tqdm
+yt-dlp
